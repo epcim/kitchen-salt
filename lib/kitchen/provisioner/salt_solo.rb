@@ -209,7 +209,7 @@ module Kitchen
         # sudo(File.join(config[:root_path], File.basename(config[:script])))
         debug(diagnose())
         if config[:salt_run_highstate]
-          cmd = sudo("salt-call --config-dir=#{File.join(config[:root_path], config[:salt_config])} --local state.highstate")
+          cmd = sudo("salt-call --retcode-passthrough --config-dir=#{File.join(config[:root_path], config[:salt_config])} --local state.highstate")
         end
 
         if config[:log_level]
