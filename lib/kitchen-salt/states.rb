@@ -33,7 +33,11 @@ module Kitchen
         end
 
         config[:dependencies].each do |formula|
-          prepare_formula formula[:path], formula[:name]
+          #if formula.has_key?('source')
+          #    case formula[:source]
+          unless %w(git apt yum spm).include?(formula[:path])
+            prepare_formula formula[:path], formula[:name]
+          end
         end
       end
 

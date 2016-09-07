@@ -59,6 +59,7 @@ module Kitchen
         require_chef: true,
         dependencies: [],
         vendor_path: nil,
+        vendor_repo: [],
         omnibus_cachier: false
       }
 
@@ -101,6 +102,63 @@ module Kitchen
             #{sudo('sh')} #{omnibus_download_dir}/install.sh -d #{omnibus_download_dir}
           fi
         INSTALL
+      end
+
+      def prepare_vendor_sources
+        config[:vendor_repo].each do |source|
+          case source
+          when 'spm'
+            <<-INSTALL
+              # configure for SPM repo
+            INSTALL
+          when 'yum'
+          when 'apt'
+            repo=config[:vendor_repo][:url]
+            rkey=config[:vendor_repo][:key]
+            comp=config[:vendor_repo][:components] || 'main'
+            <<-INSTALL
+                echo "-----> Configuring apt repo #{repo} for vendor formulas"
+                echo "deb #{repo} ${DISTRIB_CODENAME} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-formulas.list
+                do_download #{rkey} /tmp/repo_vendor.key
+                #{sudo('apt-key')} add /tmp/repo_vendor.key
+                #{sudo('apt-get')} update
+                sleep 10
+            INSTALL
+          end
+          config[:dependencies].each do |formula|
+            unless config_repo.has_key?(formula[:path])
+              raise UserError, "kitchen-salt: Invalid formula path, no such vendor_repo '#{formula[:path]}' specified."
+            end
+            case formula[:path]
+            when 'git'
+              _formulas = File.join(config[:salt_file_root],'env','_formulas')
+              # FIXME from git: use template, simplify, avoid links, platform independent
+              <<-INSTALL
+                [ ! -d #{_formulas} ] && mkdir -p #{_formulas}
+                [ ! -d #{config[:salt_fire_root]}/env/dev ] && mkdir -p #{config[:salt_fire_root]}/env/dev
+                [ ! -d /usr/share/salt-formulas/env ] && mkdir -p /usr/share/salt-formulas/env
+                #{sudo('git')} clone #{formula[:url]} #{_formulas}/formula[:name] -b #{formula[:branch] || 'master'}
+                [ ! -L "/usr/share/salt-formulas/env/#{formula[:name]}" ] && \
+                    ln -s #{_formulas}/#{formula[:name]}/#{formula[:name]} /usr/share/salt-formulas/env/#{formula[:name]}
+                [ ! -L "#{config[:salt_file_root]}/reclass/classes/service/#{formula[:name]}" ] && \
+                    ln -s #{_formulas}/#{formula[:name]}/metadata/service #{config[:salt_file_root]}/reclass/classes/service/#{formula[:name]}
+                [ ! -L #{config[:salt_file_root]}/env/dev ] && ln -s /usr/share/salt-formulas/env #{config[:salt_file_root]}/env/dev
+              INSTALL
+            when 'spm'
+              <<-INSTALL
+                #{sudo('salt-spm')} install #{formula[:name]}
+              INSTALL
+            when 'yum'
+              <<-INSTALL
+                #{sudo('yum')} install -y #{formula[:name]}
+              INSTALL
+            when 'apt'
+              <<-INSTALL
+                #{sudo('apt-get')} install -y #{formula[:name]}
+              INSTALL
+            end
+          end
+        end
       end
 
       def create_sandbox
