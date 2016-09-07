@@ -50,6 +50,7 @@ module Kitchen
         salt_env: 'base',
         salt_file_root: '/srv/salt',
         salt_pillar_root: '/srv/pillar',
+        salt_spm_root: '/srv/spm',
         salt_state_top: '/srv/salt/top.sls',
         state_collection: false,
         state_top: {},
@@ -60,6 +61,7 @@ module Kitchen
         require_chef: true,
         dependencies: [],
         vendor_path: nil,
+        vendor_repo: {},
         omnibus_cachier: false
       }
 
@@ -83,7 +85,9 @@ module Kitchen
 
         install_template = File.expand_path("./../install.erb", __FILE__)
 
-        ERB.new(File.read(install_template)).result(binding)
+        erb = ERB.new(File.read(install_template)).result(binding)
+        debug("Install Command:" + erb.to_s)
+        erb
       end
 
       def install_chef
@@ -94,14 +98,124 @@ module Kitchen
           if [ ! -d "/opt/chef" ]
           then
             echo "-----> Installing Chef Omnibus (for busser/serverspec ruby support)"
-            mkdir -p #{omnibus_download_dir}
+            mkdir -p "#{omnibus_download_dir}"
             if [ ! -x #{omnibus_download_dir}/install.sh ]
             then
               do_download #{chef_url} #{omnibus_download_dir}/install.sh
             fi
             #{sudo('sh')} #{omnibus_download_dir}/install.sh -d #{omnibus_download_dir}
-          fi
+          fi;
         INSTALL
+      end
+
+      def install_external_dependencies
+        script = ''
+
+        script += <<-INSTALL
+          echo "Install External Dependencies";
+          export SALT_ROOT="#{File.join(config[:root_path], config[:salt_file_root])}";
+          mkdir -p "${SALT_ROOT}";
+          echo "SALT_ROOT: $SALT_ROOT";
+          #set -x;
+        INSTALL
+
+        # setup spm
+        spm_repos = config[:vendor_repo].select{|x| x[:type]=='spm'}.each{|x| x[:url]}.map {|x| x[:url] }
+        spm_repos.each do |url|
+          id=url.gsub(/[htp:\/.]/,'')
+          spmreposd = File.join(config[:root_path], 'etc', 'salt', 'spm.repos.d')
+          repo_spec = File.join(spmreposd, 'spm.repo')
+          script += <<-INSTALL
+            mkdir -p '#{spmreposd}';
+            echo -e "#{id}:            " >> #{repo_spec};
+            echo -e "  url: #{url} \n\n" >> #{repo_spec};
+          INSTALL
+        end
+
+        # setup apt
+        config[:vendor_repo].select{|x| x[:type]=='apt'}.each do |repo|
+          id  =repo[:url].gsub(/[htp:\/.]/,'')
+          rurl=repo[:url]
+          rkey=repo[:key_url]
+          comp=repo[:components] || 'main'
+          script += <<-INSTALL
+            test -e /tmp/apt_repo_vendor_#{id}.key || {
+              echo "-----> Configuring formula apt vendor_repo #{rurl}"
+              eval $(cat /etc/lsb-release)
+              echo "deb #{rurl} ${DISTRIB_CODENAME} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-repo.list
+              do_download #{rkey} /tmp/apt_repo_vendor_#{id}.key
+              #{sudo('apt-key')} add /tmp/apt_repo_vendor_#{id}.key
+            };
+          INSTALL
+        end
+
+        # setup ppa
+        config[:vendor_repo].select{|x| x[:type]=='ppa'}.each do |repo|
+          script += <<-INSTALL
+              #{sudo('add-apt-repository')} "ppa:#{repo[:name]}" -y;
+          INSTALL
+        end
+
+        # TODO, setup yum repo
+
+        # update resources
+        config[:vendor_repo].map{|x| x[:type]}.uniq.each do |type|
+          case type
+          when 'apt'
+            script += <<-INSTALL
+              #{sudo('apt-get')} update -q;
+              sleep 10;
+            INSTALL
+          when 'yum'
+            script += <<-INSTALL
+              #{sudo('yum')} update;
+              sleep 10;
+            INSTALL
+          when 'spm'
+            script += <<-INSTALL
+              #{sudo('spm')} update_repo;
+            INSTALL
+          end
+        end
+
+        # install formulas
+        config[:dependencies].select{|dependency| dependency.has_key?(:repo)}.each do |formula|
+          #unless config[:vendor_repo].has_key?(formula[:repo])
+          #  raise UserError, "kitchen-salt: Invalid dependency formula :repo, no such vendor_repo '#{formula[:repo]}' specified."
+          #end
+          case formula[:repo]
+          when 'git'
+            script += <<-INSTALL
+              fetchGitFormula #{formula[:source]} "#{formula[:name]}" "#{formula[:branch] || 'master'}"
+            INSTALL
+          when 'spm'
+            script += <<-INSTALL
+              #{sudo('spm')} install #{formula[:package]||formula[:name]};
+            INSTALL
+          when 'yum'
+            script += <<-INSTALL
+              #{sudo('yum')} install -y #{formula[:package]||formula[:name]};
+            INSTALL
+          when 'apt'
+            script += <<-INSTALL
+              #{sudo('apt-get')} install -y #{formula[:package]||formula[:name]};
+            INSTALL
+          end
+        end
+        script += <<-INSTALL
+          echo "Link formulas from git/pkg/.. to kitchen salt root: $SALT_ROOT";
+          ENV=/usr/share/salt-formulas/env
+          #{sudo('ls')} $ENV/_formulas | xargs -n1 -I{} \
+            #{sudo('ln')} -fs $ENV/_formulas/{}/{} $SALT_ROOT/{};
+          #{sudo('ls')} $ENV | grep -v _formulas |xargs -n1 -I{} \
+            #{sudo('ln')} -fs $ENV/{} $SALT_ROOT/{};
+          #{sudo('chown')} kitchen.kitchen -R /usr/share/salt-formulas;
+          #{sudo('chown')} kitchen.kitchen -R $SALT_ROOT;
+          echo "SALT_ROOT: $SALT_ROOT";
+          ls -la $SALT_ROOT;
+          echo "External dependencies installed";
+        INSTALL
+        return script
       end
 
       def create_sandbox
@@ -112,16 +226,21 @@ module Kitchen
         prepare_grains
         prepare_states
         prepare_state_top
+        install_external_dependencies
       end
 
       def init_command
         debug("Initialising Driver #{name} by cleaning #{config[:root_path]}")
-        "#{sudo('rm')} -rf #{config[:root_path]} ; mkdir -p #{config[:root_path]}"
+        cmd = "mkdir -p '#{config[:root_path]}';"
+        cmd += <<-INSTALL
+          #{config[:init_environment]}
+        INSTALL
+        cmd
       end
 
       def salt_command
         salt_version = config[:salt_version]
-        cmd = sudo("salt-call --config-dir=#{File.join(config[:root_path], config[:salt_config])} --local state.highstate")
+        cmd = sudo("salt-call --state-output=changes --config-dir=#{File.join(config[:root_path], config[:salt_config])} --local state.highstate")
         cmd << " --log-level=#{config[:log_level]}" if config[:log_level]
         cmd << " --id=#{config[:salt_minion_id]}" if config[:salt_minion_id]
         cmd << " test=#{config[:dry_run]}" if config[:dry_run]
@@ -135,6 +254,7 @@ module Kitchen
       def run_command
         debug("running driver #{name}")
         debug(diagnose)
+
 
         # config[:salt_version] can be 'latest' or 'x.y.z', 'YYYY.M.x' etc
         # error return codes are a mess in salt:
