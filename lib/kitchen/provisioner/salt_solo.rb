@@ -49,6 +49,7 @@ module Kitchen
         salt_env: 'base',
         salt_file_root: '/srv/salt',
         salt_pillar_root: '/srv/pillar',
+        salt_spm_root: '/srv/spm',
         salt_state_top: '/srv/salt/top.sls',
         state_collection: false,
         state_top: {},
@@ -59,7 +60,7 @@ module Kitchen
         require_chef: true,
         dependencies: [],
         vendor_path: nil,
-        vendor_repo: [],
+        vendor_repo: {},
         omnibus_cachier: false
       }
 
@@ -105,60 +106,93 @@ module Kitchen
       end
 
       def prepare_vendor_sources
-        config[:vendor_repo].each do |source|
-          case source
-          when 'spm'
-            <<-INSTALL
-              # configure for SPM repo
+        script = ''
+
+        # setup spm
+        script << "mkdir -p #{File.join(config[:root_path], 'etc','spm.repos.d')}"
+        spm_repos = config[:vendor_repo].select{|x| x[:type]=='spm'}.uniq{|x| x[:url]}.map {|x| x[:url] }
+        spm_repos.each do |url|
+          id=url.gsub(/[htp:\/.]/,'')
+          repo_spec = File.join(config[:root_path], 'etc','spm.repos.d', id)
+          script << "test -e repo_spec || echo -e '#{id}:\n  url: #{url}' > #{repo_spec}"
+        end
+
+        # setup apt
+        config[:vendor_repo].select{|x| x[:type]=='apt'}.each do |repo|
+          id  =repo[:url].gsub(/[htp:\/.]/,'')
+          rurl=repo[:url]
+          rkey=repo[:key_url]
+          comp=repo[:components] || 'main'
+          script += <<-INSTALL
+            test -e /tmp/apt_repo_vendor_#{id}.key || {
+              echo "-----> Configuring formula apt vendor_repo #{rurl}"
+              eval $(cat /etc/lsb-release)
+              echo "deb #{rurl} ${DISTRIB_CODENAME} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-repo.list
+              do_download #{rkey} /tmp/apt_repo_vendor_#{id}.key
+              #{sudo('apt-key')} add /tmp/apt_repo_vendor_#{id}.key
+            }
+          INSTALL
+        end
+
+        # TODO, setup yum repo
+
+        # update resources
+        config[:vendor_repo].map{|x| x[:type]}.uniq.each do |type|
+          case type
+          when 'apt'
+            script += <<-INSTALL
+              #{sudo('apt-get')} update -q;
+              sleep 5;
             INSTALL
           when 'yum'
-          when 'apt'
-            repo=config[:vendor_repo][:url]
-            rkey=config[:vendor_repo][:key]
-            comp=config[:vendor_repo][:components] || 'main'
-            <<-INSTALL
-                echo "-----> Configuring apt repo #{repo} for vendor formulas"
-                echo "deb #{repo} ${DISTRIB_CODENAME} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-formulas.list
-                do_download #{rkey} /tmp/repo_vendor.key
-                #{sudo('apt-key')} add /tmp/repo_vendor.key
-                #{sudo('apt-get')} update
-                sleep 10
+            script += <<-INSTALL
+              #{sudo('yum')} update;
+              sleep 5;
             INSTALL
-          end
-          config[:dependencies].each do |formula|
-            unless config_repo.has_key?(formula[:path])
-              raise UserError, "kitchen-salt: Invalid formula path, no such vendor_repo '#{formula[:path]}' specified."
-            end
-            case formula[:path]
-            when 'git'
-              _formulas = File.join(config[:salt_file_root],'env','_formulas')
-              # FIXME from git: use template, simplify, avoid links, platform independent
-              <<-INSTALL
-                [ ! -d #{_formulas} ] && mkdir -p #{_formulas}
-                [ ! -d #{config[:salt_fire_root]}/env/dev ] && mkdir -p #{config[:salt_fire_root]}/env/dev
-                [ ! -d /usr/share/salt-formulas/env ] && mkdir -p /usr/share/salt-formulas/env
-                #{sudo('git')} clone #{formula[:url]} #{_formulas}/formula[:name] -b #{formula[:branch] || 'master'}
-                [ ! -L "/usr/share/salt-formulas/env/#{formula[:name]}" ] && \
-                    ln -s #{_formulas}/#{formula[:name]}/#{formula[:name]} /usr/share/salt-formulas/env/#{formula[:name]}
-                [ ! -L "#{config[:salt_file_root]}/reclass/classes/service/#{formula[:name]}" ] && \
-                    ln -s #{_formulas}/#{formula[:name]}/metadata/service #{config[:salt_file_root]}/reclass/classes/service/#{formula[:name]}
-                [ ! -L #{config[:salt_file_root]}/env/dev ] && ln -s /usr/share/salt-formulas/env #{config[:salt_file_root]}/env/dev
-              INSTALL
-            when 'spm'
-              <<-INSTALL
-                #{sudo('salt-spm')} install #{formula[:name]}
-              INSTALL
-            when 'yum'
-              <<-INSTALL
-                #{sudo('yum')} install -y #{formula[:name]}
-              INSTALL
-            when 'apt'
-              <<-INSTALL
-                #{sudo('apt-get')} install -y #{formula[:name]}
-              INSTALL
-            end
+          when 'spm'
+            script << "#{sudo('spm')} update_repo;"
           end
         end
+
+        # install formulas
+        config[:dependencies].each do |formula|
+          #unless config[:vendor_repo].has_key?(formula[:path])
+          #  raise UserError, "kitchen-salt: Invalid dependency formula :path, no such vendor_repo '#{formula[:path]}' specified."
+          #end
+          case formula[:path]
+          when 'git'
+            script += <<-INSTALL
+              export SALT_ROOT=#{File.join(config[:root_path], config[:salt_file_root])}
+              mkdir -p $SALT_ROOT/git
+              test -e $SALT_ROOT/git/#{formula[:name]} && {
+                cd $SALT_ROOT/git/#{formula[:name]}
+                git pull -r
+                cd -
+              } || {
+                git clone #{formula[:url]} $SALT_ROOT/git/#{formula[:name]} -b #{formula[:branch] || 'master'}
+                ln -fs $SALT_ROOT/git/#{formula[:name]}/#{formula[:name]} $SALT_ROOT
+              }
+            INSTALL
+          when 'spm'
+            # TODO, install spm packages with dependencies
+            script += <<-INSTALL
+              #{sudo('spm')} install #{formula[:package]||formula[:name]}
+            INSTALL
+          when 'yum'
+            script += <<-INSTALL
+              #{sudo('yum')} install -y #{formula[:package]||formula[:name]}
+            INSTALL
+          when 'apt'
+            script += <<-INSTALL
+              #{sudo('apt-get')} install -y #{formula[:package]||formula[:name]}
+            INSTALL
+          end
+        end
+        # restart salt-master in order to refresh
+        script += <<-INSTALL
+          #{sudo('service')} salt-master restart
+        INSTALL
+        return script
       end
 
       def create_sandbox
@@ -173,7 +207,11 @@ module Kitchen
 
       def init_command
         debug("Initialising Driver #{name} by cleaning #{config[:root_path]}")
-        "#{sudo('rm')} -rf #{config[:root_path]} ; mkdir -p #{config[:root_path]}"
+        cmd = "#{sudo('rm')} -rf #{config[:root_path]} ; mkdir -p #{config[:root_path]}"
+        cmd += <<-INSTALL
+          #{config[:init_environment]}
+        INSTALL
+        cmd
       end
 
       def salt_command
@@ -191,6 +229,7 @@ module Kitchen
       def run_command
         debug("running driver #{name}")
         debug(diagnose)
+
 
         # config[:salt_version] can be 'latest' or 'x.y.z', 'YYYY.M.x' etc
         # error return codes are a mess in salt:
@@ -210,7 +249,7 @@ module Kitchen
           cmd << ' [ ${SC} -ne 0 ] && exit ${SC} ; [ ${EC} -eq 0 ] && exit 1 ; [ ${EC} -eq 1 ] && exit 0)'
           cmd
         else
-          salt_command         
+          salt_command
         end
       end
 
