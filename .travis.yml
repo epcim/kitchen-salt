@@ -1,7 +1,7 @@
 language: ruby
 
 services:
-      - docker
+  - docker
 
 rvm:
   - 2.2.4
@@ -24,7 +24,7 @@ install:
   - export FORMULA=salt-formula-git
   - export BUNDLE_GEMFILE=$PWD/Gemfile
   - bundle install --without='vagrant'
-  - git clone https://github.com/epcim/$FORMULA.git --branch test-kitchen --single-branch ../$FORMULA
+  - git clone https://github.com/salt-formulas/$FORMULA.git --branch master --single-branch ../$FORMULA
   - cd ../$FORMULA
   - for f in Rakefile .kitchen.salt.yml; do test -e $f || cp ../kitchen-salt/$f . ;done
   - KITCHEN_LOCAL_YAML=.kitchen.salt.yml bundle exec kitchen list
