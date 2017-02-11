@@ -79,8 +79,14 @@ fi
 # sample to output:
 #    https://github.com/salt-formulas/salt-formula-git git
 #    https://github.com/salt-formulas/salt-formula-salt salt
-function fetchGitFormulaDependencies {
-    grep " name\\| source" "$1" | sed -e "s/^.\\*:\\ //g" -e '$a\\\\n' -e '/^\\s*$/d' | tac | xargs -n2 echo fetchGitFormula
+function fetchDependencies() {
+    METADATA="$1";
+    grep -E "^dependencies:" "$METADATA" >/dev/null || return 0
+    (python - $METADATA | while read dep; do fetchGitFormula $dep; done) <<-DEPS
+		import sys,yaml
+		for dep in yaml.load(open(sys.argv[1], "ro"))["dependencies"]:
+		  print("{source} {name}").format(**dep)
+		DEPS
 }
 
 # Fetch formula from git repo
@@ -96,22 +102,20 @@ function fetchGitFormula {
         name="$2"
         test -n "$name" || name="${source//*salt-formula-}"
         test -z "$3" && branch=master || branch=$3
-        if ! [[ "${FETCHED[*]}" =~ "$name" ]]; then # if dependencies not yet fetched
-        echo "Fetching: $name"
-        if test -e "$GIT_FORMULAS_PATH/$name"; then
-            pushd "$GIT_FORMULAS_PATH/$name" &>/dev/null
-            test ! -e .git || #{sudo('git')} pull -r
-            popd &>/dev/null
-        else
-            echo "#{sudo('git')} clone $source $GIT_FORMULAS_PATH/$name -b $branch"
-            #{sudo('git')} clone "$source" "$GIT_FORMULAS_PATH/$name" -b "$branch"
+        if ! [[ "${FETCHED[*]}" =~ "$name" ]]; then # dependency not yet fetched
+          echo "Fetching: $name"
+          if test -e "$GIT_FORMULAS_PATH/$name"; then
+              pushd "$GIT_FORMULAS_PATH/$name" &>/dev/null
+              test ! -e .git || #{sudo('git')} pull -r
+              popd &>/dev/null
+          else
+              echo "#{sudo('git')} clone $source $GIT_FORMULAS_PATH/$name -b $branch"
+              #{sudo('git')} clone "$source" "$GIT_FORMULAS_PATH/$name" -b "$branch"
+          fi
+          # install dependencies
+          FETCHED+=($name)
+          fetchDependencies "$GIT_FORMULAS_PATH/$name/metadata.yml"
         fi
-        # install dependencies
-        if grep dependencies: "$GIT_FORMULAS_PATH/$name/metadata.yml" &>/dev/null; then
-            FETCHED+=($name)
-            eval "$(fetchGitFormulaDependencies "$GIT_FORMULAS_PATH/$name/metadata.yml")"
-        fi
-      fi
     else
         echo Usage: fetchGitFormula "<git repo>" "[local formula directory name]" "[branch]"
     fi
