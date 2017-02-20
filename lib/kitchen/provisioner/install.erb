@@ -39,14 +39,12 @@ then
   sleep 10
   echo "-----> Installing salt-minion (#{salt_version})"
   #{sudo('apt-get')} install -y python-support
-  #{sudo('apt-get')} install -y salt-minion
-  #{sudo('apt-get')} install -y salt-common
-  #{sudo('apt-get')} install -y salt-minion
+  #{sudo('apt-get')} install -y salt-minion salt-common
 elif [ -z "${SALT_VERSION}" -a "#{salt_install}" = "ppa" ]
 then
   #{sudo('apt-add-repository')} -y #{salt_ppa}
   #{sudo('apt-get')} update
-  #{sudo('apt-get')} install -y salt-minion
+  #{sudo('apt-get')} install -y salt-minion salt-common
 fi
 
 # check again, now that an install of some form should have happened
@@ -72,6 +70,22 @@ then
 else
   echo "You asked for #{salt_version} and you have got ${SALT_VERSION} installed, dunno how to fix that, sorry!"
   exit 2
+fi
+
+echo "-----> Installing other dependencies..."
+YUM_CMD="$(which yum)"
+APT_CMD="$(which apt-get)"
+APK_CMD="$(which apk)"
+if [[ -z "$(which git)" ]]; then
+  if [[ ! -z "$APT_CMD" ]]; then
+    #{sudo('apt-get')} install -y git
+  elif [[ ! -z "$YUM_CMD" ]]; then
+    #{sudo('yum')} install -y git
+  elif [[ ! -z "$APK_CMD"  ]]; then
+    #{sudo('apk')} install -y git
+  else
+    echo "Error, cannot install package git"
+  fi
 fi
 
 # Parse git dependencies from metadata.yml

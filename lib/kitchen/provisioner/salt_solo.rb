@@ -148,6 +148,7 @@ module Kitchen
           id  =repo[:url].gsub(/[htp:\/.]/,'')
           rurl=repo[:url]
           rkey=repo[:key_url]
+          arch=repo[:arch] || '[arch=amd64]'
           comp=repo[:components] || 'main'
           dist=repo[:distribution] || '$DISTRIB_CODENAME'
           script += <<-INSTALL
@@ -155,7 +156,7 @@ module Kitchen
               echo "-----> Configuring formula apt vendor_repo #{rurl}"
               eval $(cat /etc/lsb-release)
               if do_download #{rkey} /tmp/apt_repo_vendor_#{id}.key; then
-                echo "deb #{rurl} #{dist} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-repo.list
+                echo "deb #{arch} #{rurl} #{dist} #{comp}" | #{sudo('tee')} /etc/apt/sources.list.d/vendor-repo.list
                 #{sudo('apt-key')} add /tmp/apt_repo_vendor_#{id}.key
               fi
             };
