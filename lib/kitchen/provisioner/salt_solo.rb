@@ -109,7 +109,7 @@ module Kitchen
           then
             echo "Failed install ruby(-dev) using assets.sh from kitchen-salt"
             echo "-----> Fallback to Chef Bootstrap script (for busser/serverspec ruby support)"
-            mkdir -p #{omnibus_download_dir}
+            mkdir -p "#{omnibus_download_dir}"
             if [ ! -x #{omnibus_download_dir}/install.sh ]
             then
               do_download #{chef_url} #{omnibus_download_dir}/install.sh
